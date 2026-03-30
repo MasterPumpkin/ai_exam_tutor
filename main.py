@@ -5,6 +5,7 @@ import json
 from groq import Groq, RateLimitError, AuthenticationError, APIConnectionError, APITimeoutError
 import re
 import zipfile
+from zipfile import BadZipFile
 import io
 import random
 
@@ -59,7 +60,6 @@ MAX_RESENI_ZNAKU = 50_000  # Maximální délka řešení v znacích vkládaná 
 # --- 2. FUNKCE ---
 def vygeneruj_zadani_podle_sablony(klic_okruhu, api_key, token_placeholder=None):
     sablona = MATURITNI_OKRUHY[klic_okruhu]
-    client = Groq(api_key=api_key)
     
     system_prompt = f"""Jsi asistent pro tvorbu maturitních úloh z programování.
 Tvá role je vygenerovat NOVOU úlohu na základě poskytnutého vzoru a instrukcí.
@@ -82,6 +82,8 @@ Vrať POUZE platný formát JSON s následující strukturou:
 }}"""
 
     try:
+        client = Groq(api_key=api_key)
+        
         inspirace = ["vesmírná loď", "psí útulek", "středověká krčma", "půjčovna lyží", 
                      "evidence magických lektvarů", "správa ZOO", "kavárna", "autodílna", 
                      "eshop s elektronikou", "botanická zahrada", "farma plná zvířat", 
@@ -98,9 +100,10 @@ Vrať POUZE platný formát JSON s následující strukturou:
             temperature=0.7
         )
 
-        st.session_state['celkove_tokeny'] += response.usage.total_tokens
-        if token_placeholder:
-            token_placeholder.metric("📊 Spotřebované tokeny", f"{st.session_state['celkove_tokeny']:,}")
+        if response.usage and response.usage.total_tokens:
+            st.session_state['celkove_tokeny'] += response.usage.total_tokens
+            if token_placeholder:
+                token_placeholder.metric("📊 Spotřebované tokeny", f"{st.session_state['celkove_tokeny']:,}")
         
         if not response.choices:
             return False, "AI nevrátila žádnou odpověď."
@@ -113,7 +116,10 @@ Vrať POUZE platný formát JSON s následující strukturou:
             raw_content = raw_content[:-3]
         raw_content = raw_content.strip()
 
-        vysledek_json = json.loads(raw_content)
+        try:
+            vysledek_json = json.loads(raw_content)
+        except json.JSONDecodeError:
+            return False, "AI vrátila neplatný formát odpovědi. Zkuste vygenerovat zadání znovu."
         
         nazev = vysledek_json.get("nazev_ulohy", "Maturitní úloha")
         zadani_md = vysledek_json.get("zadani_markdown", "Chyba: Model nevygeneroval text zadání.")
@@ -157,7 +163,6 @@ st.set_page_config(page_title="Maturitní AI Trenér", page_icon="🎓", layout=
 # Kvůli kompatibilitě se podíváme na GROQ_API_KEY i OPENAI_API_KEY z .env
 api_key = os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY") 
 
-# (Na úplný začátek souboru, někam pod st.set_page_config, přidej:)
 if 'celkove_tokeny' not in st.session_state:
     st.session_state['celkove_tokeny'] = 0
 
@@ -235,23 +240,32 @@ with tab_evaluator:
         if 'posledni_otisk_souboru' not in st.session_state or st.session_state['posledni_otisk_souboru'] != aktualni_otisk:
             
             # 1. Zpracování zadání (to je vždy .md)
-            st.session_state['obsah_zadani'] = soubor_zadani.getvalue().decode("utf-8")
+            try:
+                st.session_state['obsah_zadani'] = soubor_zadani.getvalue().decode("utf-8")
+            except UnicodeDecodeError:
+                st.error("❌ Soubor se zadáním není platný textový soubor (chybné kódování). Použijte soubor v UTF-8.")
+                st.stop()
             st.session_state['metadata'] = ziskej_metadata_ze_zadani(st.session_state['obsah_zadani'])
             st.session_state['zadani_name'] = soubor_zadani.name
             
             # 2. Zpracování řešení (Může být textový kód NEBO ZIP archiv)
             if soubor_reseni.name.endswith('.zip'):
                 nacteny_kod = ""
-                # Otevřeme ZIP přímo z paměti
-                with zipfile.ZipFile(soubor_reseni) as z:
-                    for jmeno_souboru in z.namelist():
+                try:
+                    archiv = zipfile.ZipFile(soubor_reseni)
+                except BadZipFile:
+                    st.error("❌ Nahraný soubor není platný ZIP archiv.")
+                    st.stop()
+                
+                with archiv:
+                    for jmeno_souboru in archiv.namelist():
                         # Ignorujeme složky a skryté systémové soubory (jako .DS_Store z Macu)
                         if jmeno_souboru.endswith('/') or '__MACOSX' in jmeno_souboru or jmeno_souboru.startswith('.'):
                             continue
                         
                         try:
                             # Zkusíme soubor přečíst jako text
-                            obsah = z.read(jmeno_souboru).decode('utf-8')
+                            obsah = archiv.read(jmeno_souboru).decode('utf-8')
                             nacteny_kod += f"\n\n==== SOUBOR: {jmeno_souboru} ====\n{obsah}\n"
                             if len(nacteny_kod) > MAX_RESENI_ZNAKU:
                                 st.warning("⚠️ Řešení je příliš velké, načtena pouze část souborů.")
@@ -261,13 +275,23 @@ with tab_evaluator:
                             pass
                 
                 if not nacteny_kod.strip():
-                    st.error("ZIP soubor je prázdný nebo neobsahuje žádné čitelné textové soubory.")
+                    st.error("❌ ZIP soubor je prázdný nebo neobsahuje žádné čitelné textové soubory.")
                     st.stop()
                     
                 st.session_state['obsah_reseni'] = nacteny_kod
             else:
                 # Klasický jeden soubor (.py, .js atd.)
-                st.session_state['obsah_reseni'] = soubor_reseni.getvalue().decode("utf-8")
+                try:
+                    obsah_souboru = soubor_reseni.getvalue().decode("utf-8")
+                except UnicodeDecodeError:
+                    st.error("❌ Soubor s řešením není platný textový soubor (chybné kódování). Použijte soubor v UTF-8.")
+                    st.stop()
+                
+                if len(obsah_souboru) > MAX_RESENI_ZNAKU:
+                    st.warning(f"⚠️ Soubor je velmi velký ({len(obsah_souboru):,} znaků). Bude oříznut na {MAX_RESENI_ZNAKU:,} znaků.")
+                    obsah_souboru = obsah_souboru[:MAX_RESENI_ZNAKU]
+                
+                st.session_state['obsah_reseni'] = obsah_souboru
             
             # Uložíme si nový otisk do paměti
             st.session_state['posledni_otisk_souboru'] = aktualni_otisk
@@ -323,7 +347,6 @@ KÓD STUDENTA:
 5. AKTUALIZACE BODŮ A TÓN: Pokud student kód úspěšně opraví v chatu, pochval ho a mentálně (či textově) mu aktualizuj bodování. Udržuj profesionální, ale lidský tón. Nepiš jako robot.
 """
                 st.session_state['chat_history'] = [{"role": "system", "content": system_prompt}]
-                st.session_state['evaluace_spustena'] = True
                 
                 # Volání AI pro první zprávu
                 with st.spinner("Inspektor připravuje hodnocení..."):
@@ -336,24 +359,31 @@ KÓD STUDENTA:
                         )
                     except RateLimitError:
                         st.error("⏳ Byl překročen limit požadavků na AI. Počkejte prosím minutu a zkuste to znovu.")
+                        del st.session_state['chat_history']
                         st.stop()
                     except AuthenticationError:
                         st.error("🔑 API klíč je neplatný nebo expiroval. Zkontrolujte ho v levém panelu.")
+                        del st.session_state['chat_history']
                         st.stop()
                     except (APIConnectionError, APITimeoutError):
                         st.error("🌐 Nepodařilo se spojit se serverem AI. Zkontrolujte připojení k internetu.")
+                        del st.session_state['chat_history']
                         st.stop()
                     except Exception as e:
                         st.error(f"❌ Neočekávaná chyba: {e}")
+                        del st.session_state['chat_history']
                         st.stop()
                 
                 if not response.choices:
                     st.error("❌ AI nevrátila žádnou odpověď.")
+                    del st.session_state['chat_history']
                     st.stop()
                 
-                st.session_state['celkove_tokeny'] += response.usage.total_tokens
-                token_placeholder.metric("📊 Spotřebované tokeny", f"{st.session_state['celkove_tokeny']:,}")
+                if response.usage and response.usage.total_tokens:
+                    st.session_state['celkove_tokeny'] += response.usage.total_tokens
+                    token_placeholder.metric("📊 Spotřebované tokeny", f"{st.session_state['celkove_tokeny']:,}")
                 
+                st.session_state['evaluace_spustena'] = True
                 st.session_state['chat_history'].append({"role": "assistant", "content": response.choices[0].message.content})
                 st.rerun()
 
@@ -436,8 +466,9 @@ KÓD STUDENTA:
                             st.rerun()
                         
                         # Přičtení tokenů za tuto zprávu
-                        st.session_state['celkove_tokeny'] += response.usage.total_tokens
-                        token_placeholder.metric("📊 Spotřebované tokeny", f"{st.session_state['celkove_tokeny']:,}")
+                        if response.usage and response.usage.total_tokens:
+                            st.session_state['celkove_tokeny'] += response.usage.total_tokens
+                            token_placeholder.metric("📊 Spotřebované tokeny", f"{st.session_state['celkove_tokeny']:,}")
                             
                         odpoved = response.choices[0].message.content
                         st.markdown(odpoved)
