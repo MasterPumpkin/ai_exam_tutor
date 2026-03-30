@@ -185,12 +185,12 @@ with st.sidebar:
     token_placeholder = st.empty() 
     token_placeholder.metric("📊 Spotřebované tokeny", f"{st.session_state.get('celkove_tokeny', 0):,}")
 
+# --- HLAVNÍ ROZHRANÍ ---
+st.title("🎓 Maturitní AI Trenér programování")
+
 if not api_key:
     st.info("👈 Pro spuštění aplikace vložte API klíč v levém panelu.")
     st.stop()
-
-# --- HLAVNÍ ROZHRANÍ ---
-st.title("🎓 Maturitní AI Trenér programování")
 
 tab_generator, tab_evaluator = st.tabs(["1️⃣ Generátor zadání", "2️⃣ Evaluátor řešení"])
 
