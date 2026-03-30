@@ -4,6 +4,8 @@ from dotenv import load_dotenv
 import json
 from groq import Groq
 import re
+import zipfile
+import io
 
 # --- 1. DATABÁZE MATURITNÍCH OKRUHŮ ---
 MATURITNI_OKRUHY = {
@@ -204,22 +206,58 @@ with tab_evaluator:
     with col1:
         soubor_zadani = st.file_uploader("Nahraj zadání (.md)", type=['md'], key="eval_md")
     with col2:
-        soubor_reseni = st.file_uploader("Nahraj své řešení (.py)", type=['py'], key="eval_py")
+        soubor_reseni = st.file_uploader("Nahraj své řešení (Kód nebo ZIP)", type=['py', 'js', 'php', 'html', 'css', 'cpp', 'zip'], key="eval_py")
 
     # 2. Zpracování souborů do Cache
     if soubor_zadani and soubor_reseni:
         
-        # Ošetření: Načteme soubory pouze poprvé, nebo když uživatel zmáčkne reset
-        if 'zadani_nahrano' not in st.session_state or soubor_zadani.name != st.session_state.get('zadani_name', ''):
+        # Vytvoříme unikátní identifikátor (jména a velikosti obou nahraných souborů)
+        aktualni_otisk = f"{soubor_zadani.name}_{soubor_zadani.size}_{soubor_reseni.name}_{soubor_reseni.size}"
+        
+        # Ošetření: Načteme soubory poprvé, nebo když se změní "otisk" (nahraješ jiný soubor nebo upravenou verzi)
+        if 'posledni_otisk_souboru' not in st.session_state or st.session_state['posledni_otisk_souboru'] != aktualni_otisk:
+            
+            # 1. Zpracování zadání (to je vždy .md)
             st.session_state['obsah_zadani'] = soubor_zadani.getvalue().decode("utf-8")
-            st.session_state['obsah_reseni'] = soubor_reseni.getvalue().decode("utf-8")
             st.session_state['metadata'] = ziskej_metadata_ze_zadani(st.session_state['obsah_zadani'])
             st.session_state['zadani_name'] = soubor_zadani.name
+            
+            # 2. Zpracování řešení (Může být textový kód NEBO ZIP archiv)
+            if soubor_reseni.name.endswith('.zip'):
+                nacteny_kod = ""
+                # Otevřeme ZIP přímo z paměti
+                with zipfile.ZipFile(soubor_reseni) as z:
+                    for jmeno_souboru in z.namelist():
+                        # Ignorujeme složky a skryté systémové soubory (jako .DS_Store z Macu)
+                        if jmeno_souboru.endswith('/') or '__MACOSX' in jmeno_souboru or jmeno_souboru.startswith('.'):
+                            continue
+                        
+                        try:
+                            # Zkusíme soubor přečíst jako text
+                            obsah = z.read(jmeno_souboru).decode('utf-8')
+                            nacteny_kod += f"\n\n==== SOUBOR: {jmeno_souboru} ====\n{obsah}\n"
+                        except UnicodeDecodeError:
+                            # Pokud je to obrázek (png/jpg) nebo binárka, přeskočíme ho
+                            pass
+                
+                if not nacteny_kod.strip():
+                    st.error("ZIP soubor je prázdný nebo neobsahuje žádné čitelné textové soubory.")
+                    st.stop()
+                    
+                st.session_state['obsah_reseni'] = nacteny_kod
+            else:
+                # Klasický jeden soubor (.py, .js atd.)
+                st.session_state['obsah_reseni'] = soubor_reseni.getvalue().decode("utf-8")
+            
+            # Uložíme si nový otisk do paměti
+            st.session_state['posledni_otisk_souboru'] = aktualni_otisk
             st.session_state['zadani_nahrano'] = True
             
-            # Resetujeme chat, pokud se nahrály nové soubory
+            # Tvrdý reset chatu a Inspektora, protože se změnily zdrojové soubory!
             if 'evaluace_spustena' in st.session_state:
                 del st.session_state['evaluace_spustena']
+            if 'chat_history' in st.session_state:
+                del st.session_state['chat_history']
         
         metadata = st.session_state.get('metadata')
         obsah_zadani = st.session_state.get('obsah_zadani')
@@ -252,15 +290,17 @@ METADATA PRO BODOVÁNÍ:
 KÓD STUDENTA:
 {obsah_reseni}
 
-=== TVÁ PRAVIDLA ===
-1. NIKDY nepiš hotový kód ani neopravuj chyby přímo. 
-2. V PRVNÍ ZPRÁVĚ: 
+=== TVÁ PRAVIDLA CHOVÁNÍ (ABSOLUTNĚ KRITICKÉ) ===
+1. SOKRATOVSKÁ METODA A ZÁKAZ PSANÍ KÓDU: NIKDY, za žádných okolností, neposkytuj studentovi kompletní bloky kódu (např. definice třídy, celé funkce nebo cykly). Tvé poslání je donutit ho přemýšlet. Můžeš ukázat maximálně 1-2 řádky kódu POUZE v případě, že vysvětluješ specifikum jazyka nebo opravuješ banální překlep.
+2. SCÉNÁŘ "LÍNÝ STUDENT": Pokud student odpovídá jen "nevím", "???", "jak?", nebo nejeví snahu, NEPIŠ KÓD ZA NĚJ! Odpověz mu např.: "Jsem tu, abych tě navedl, ne abych to napsal za tebe. Zkus napsat alespoň jeden řádek sám, nebo mi řekni, které části přesně nerozumíš."
+3. V PRVNÍ ZPRÁVĚ (Hodnocení): 
    - Pozdrav studenta.
    - Proveď ODHAD BODOVÁNÍ podle kritérií (např. Funkčnost: 5/15 - nefunguje vyhledávání).
    - Sečti body a urči známku (100-90: 1, 89-80: 2, 79-65: 3, 64-50: 4, pod 50: 5).
-   - Pochval, co je dobře.
-   - Vyber JEDEN největší problém a polož k němu Sokratovskou otázku.
-3. V DALŠÍCH ZPRÁVÁCH: Buď stručný, ptej se na logiku, veď studenta krok po kroku. Pokud student kód opraví v chatu, pochval ho a aktualizuj bodování.
+   - Pochval, co je v kódu dobře.
+   - Vyber JEDEN největší problém a polož k němu návodnou Sokratovskou otázku.
+4. V DALŠÍCH ZPRÁVÁCH (Krok za krokem): Buď stručný, ptej se na logiku. Nezahlť studenta výčtem deseti chyb najednou. Řeš s ním vždy jen jeden problém.
+5. AKTUALIZACE BODŮ A TÓN: Pokud student kód úspěšně opraví v chatu, pochval ho a mentálně (či textově) mu aktualizuj bodování. Udržuj profesionální, ale lidský tón. Nepiš jako robot.
 """
                 st.session_state['chat_history'] = [{"role": "system", "content": system_prompt}]
                 st.session_state['evaluace_spustena'] = True
