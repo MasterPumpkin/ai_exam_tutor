@@ -6,6 +6,7 @@ from groq import Groq
 import re
 import zipfile
 import io
+import random
 
 # --- 1. DATABÁZE MATURITNÍCH OKRUHŮ ---
 MATURITNI_OKRUHY = {
@@ -79,11 +80,17 @@ Vrať POUZE platný formát JSON s následující strukturou:
 }}"""
 
     try:
+        inspirace = ["vesmírná loď", "psí útulek", "středověká krčma", "půjčovna lyží", 
+                     "evidence magických lektvarů", "správa ZOO", "kavárna", "autodílna", 
+                     "eshop s elektronikou", "botanická zahrada", "farma plná zvířat", 
+                     "rockový festival", "závody formulí"]
+        nahodne_tema = random.choice(inspirace)
+
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Vygeneruj maturitní úlohu pro okruh: {sablona['nazev']}"}
+                {"role": "user", "content": f"Vygeneruj maturitní úlohu pro okruh: {sablona['nazev']}. ABSOLUTNĚ KRITICKÝ POKYN: Zasaď příběh úlohy do tohoto prostředí: '{nahodne_tema}'. V žádném případě negeneruj evidenci docházky ani knihovnu!"}
             ],
             response_format={"type": "json_object"},
             temperature=0.7
@@ -155,7 +162,7 @@ with st.sidebar:
         st.success("API klíč připraven.")
     
     st.markdown("---")
-    st.markdown("Aplikace pro přípravu na maturitu z programování.")
+    st.info("💡 **Kde získat API klíč?**\n1. [console.groq.com](https://console.groq.com/keys)\n2. Přihlaste se\n3. Create API Key")
     
     st.markdown("---")
     token_placeholder = st.empty() 
