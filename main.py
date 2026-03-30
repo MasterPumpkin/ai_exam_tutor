@@ -321,6 +321,7 @@ KÓD STUDENTA:
 
             # 2. Vstup od studenta
             if prompt := st.chat_input("Tvá odpověď nebo opravený kód..."):
+                # Uložíme dotaz a rovnou ho i tady pro jistotu vypíšeme
                 st.session_state['chat_history'].append({"role": "user", "content": prompt})
                 with st.chat_message("user"):
                     st.markdown(prompt)
@@ -335,11 +336,17 @@ KÓD STUDENTA:
                             temperature=0.3
                         )
                         
-                        # NOVÉ PRO KROK 3: Přičtení tokenů za tuto zprávu
+                        # Přičtení tokenů za tuto zprávu
                         if 'celkove_tokeny' in st.session_state:
                             st.session_state['celkove_tokeny'] += response.usage.total_tokens
                             token_placeholder.metric("📊 Spotřebované tokeny", f"{st.session_state['celkove_tokeny']:,}")
                             
                         odpoved = response.choices[0].message.content
                         st.markdown(odpoved)
+                        
+                        # Uložení odpovědi do historie
                         st.session_state['chat_history'].append({"role": "assistant", "content": odpoved})
+                
+                # OPRAVA: Tímto příkazem donutíme aplikaci hned překreslit celou stránku,
+                # čímž se bezpečně zobrazí jak historie, tak se znovu otevře textové pole.
+                st.rerun()
