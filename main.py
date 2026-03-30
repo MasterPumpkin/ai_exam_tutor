@@ -7,6 +7,7 @@ import re
 import zipfile
 from zipfile import BadZipFile
 import random
+from streamlit_ace import st_ace
 
 # --- 1. DATABÁZE MATURITNÍCH OKRUHŮ ---
 MATURITNI_OKRUHY = {
@@ -225,20 +226,88 @@ with tab_generator:
 with tab_evaluator:
     st.header("Inspektor – Sokratovské hodnocení")
     
-    # 1. Nahrávání souborů
-    col1, col2 = st.columns(2)
-    with col1:
-        soubor_zadani = st.file_uploader("Nahraj zadání (.md)", type=['md'], key="eval_md")
-    with col2:
-        soubor_reseni = st.file_uploader("Nahraj své řešení (Kód nebo ZIP)", type=['py', 'js', 'php', 'html', 'css', 'cpp', 'zip'], key="eval_py")
+    # 1. Nahrání zadání
+    soubor_zadani = st.file_uploader("📄 Nahraj zadání (.md)", type=['md'], key="eval_md")
+    
+    # Náhled zadání – zobrazíme hned po nahrání, bez čekání na řešení
+    if soubor_zadani:
+        try:
+            nahled_zadani = soubor_zadani.getvalue().decode("utf-8")
+        except UnicodeDecodeError:
+            nahled_zadani = None
+        
+        if nahled_zadani:
+            with st.expander("📄 Kompletní text maturitního zadání", expanded=False):
+                ciste_zadani = re.sub(r"<!-- EVAL_METADATA: (.*?) -->", "", nahled_zadani, flags=re.DOTALL)
+                st.markdown(ciste_zadani)
+    
+    st.divider()
+    
+    # 2. Vložení řešení (soubor nebo editor)
+    zpusob_vlozeni = st.radio(
+        "Způsob vložení řešení:",
+        ["📁 Nahrát soubor / ZIP", "✏️ Psát kód v editoru"],
+        horizontal=True
+    )
+    
+    soubor_reseni = None
+    kod_z_editoru = ""
+    
+    if zpusob_vlozeni == "📁 Nahrát soubor / ZIP":
+        soubor_reseni = st.file_uploader(
+            "Nahraj své řešení (Kód nebo ZIP)",
+            type=['py', 'js', 'php', 'html', 'css', 'cpp', 'cs', 'zip'],
+            key="eval_py"
+        )
+    else:
+        # Slovník podporovaných jazyků (Klíč = název pro UI, Hodnota = kód pro Ace editor)
+        podporovane_jazyky = {
+            "Python": "python",
+            "JavaScript": "javascript",
+            "PHP": "php",
+            "C++ / C": "c_cpp",
+            "C#": "csharp",
+            "HTML": "html",
+            "CSS": "css",
+            "Java": "java"
+        }
+        
+        vybrany_nazev_jazyka = st.selectbox(
+            "Zvolte programovací jazyk:",
+            list(podporovane_jazyky.keys())
+        )
+        vybrany_kod_jazyka = podporovane_jazyky[vybrany_nazev_jazyka]
+        
+        st.caption(f"✏️ Pište nebo vložte svůj kód v jazyce {vybrany_nazev_jazyka}")
+        with st.container(border=True):
+            kod_z_editoru = st_ace(
+                value="",
+                language=vybrany_kod_jazyka,
+                theme="github",
+                keybinding="vscode",
+                font_size=14,
+                tab_size=4,
+                min_lines=20,
+                key="ace_editor"
+            )
 
-    # 2. Zpracování souborů do Cache
-    if soubor_zadani and soubor_reseni:
+    # 2. Zpracování souborů / editoru do Cache
+    ma_reseni = soubor_reseni or (kod_z_editoru and kod_z_editoru.strip())
+    
+    if soubor_zadani and ma_reseni:
         
-        # Vytvoříme unikátní identifikátor (jména a velikosti obou nahraných souborů)
-        aktualni_otisk = f"{soubor_zadani.name}_{soubor_zadani.size}_{soubor_reseni.name}_{soubor_reseni.size}"
+        # Vytvoříme unikátní identifikátor – zvlášť pro zadání a řešení
+        zadani_otisk = f"{soubor_zadani.name}_{soubor_zadani.size}"
         
-        # Ošetření: Načteme soubory poprvé, nebo když se změní "otisk" (nahraješ jiný soubor nebo upravenou verzi)
+        if zpusob_vlozeni == "📁 Nahrát soubor / ZIP" and soubor_reseni:
+            reseni_otisk = f"file_{soubor_reseni.name}_{soubor_reseni.size}"
+        else:
+            # Hash z textu v editoru – při jakékoli změně kódu se chat resetuje
+            reseni_otisk = f"editor_{hash(kod_z_editoru)}"
+        
+        aktualni_otisk = f"{zadani_otisk}_{reseni_otisk}"
+        
+        # Ošetření: Načteme soubory poprvé, nebo když se změní "otisk"
         if 'posledni_otisk_souboru' not in st.session_state or st.session_state['posledni_otisk_souboru'] != aktualni_otisk:
             
             # 1. Zpracování zadání (to je vždy .md)
@@ -250,54 +319,65 @@ with tab_evaluator:
             st.session_state['metadata'] = ziskej_metadata_ze_zadani(st.session_state['obsah_zadani'])
             st.session_state['zadani_name'] = soubor_zadani.name
             
-            # 2. Zpracování řešení (Může být textový kód NEBO ZIP archiv)
-            if soubor_reseni.name.lower().endswith('.zip'):
-                nacteny_kod = ""
-                try:
-                    archiv = zipfile.ZipFile(soubor_reseni)
-                except BadZipFile:
-                    st.error("❌ Nahraný soubor není platný ZIP archiv.")
-                    st.stop()
-                
-                with archiv:
-                    for jmeno_souboru in archiv.namelist():
-                        # Ignorujeme složky a skryté systémové soubory (jako .DS_Store z Macu)
-                        if jmeno_souboru.endswith('/') or '__MACOSX' in jmeno_souboru or jmeno_souboru.startswith('.'):
-                            continue
-                        
-                        try:
-                            # Zkusíme soubor přečíst jako text
-                            obsah = archiv.read(jmeno_souboru).decode('utf-8')
-                            nacteny_kod += f"\n\n==== SOUBOR: {jmeno_souboru} ====\n{obsah}\n"
-                            if len(nacteny_kod) > MAX_RESENI_ZNAKU:
-                                st.warning("⚠️ Řešení je příliš velké, načtena pouze část souborů.")
-                                break
-                        except UnicodeDecodeError:
-                            # Pokud je to obrázek (png/jpg) nebo binárka, přeskočíme ho
-                            pass
-                        except RuntimeError:
-                            # Heslem chráněný soubor v ZIP archivu
-                            st.error("❌ ZIP archiv obsahuje soubory chráněné heslem. Nahrajte archiv bez hesla.")
-                            st.stop()
-                
-                if not nacteny_kod.strip():
-                    st.error("❌ ZIP soubor je prázdný nebo neobsahuje žádné čitelné textové soubory.")
-                    st.stop()
+            # 2. Zpracování řešení
+            if zpusob_vlozeni == "📁 Nahrát soubor / ZIP" and soubor_reseni:
+                # --- Nahrání souboru / ZIP ---
+                if soubor_reseni.name.lower().endswith('.zip'):
+                    nacteny_kod = ""
+                    try:
+                        archiv = zipfile.ZipFile(soubor_reseni)
+                    except BadZipFile:
+                        st.error("❌ Nahraný soubor není platný ZIP archiv.")
+                        st.stop()
                     
-                st.session_state['obsah_reseni'] = nacteny_kod
+                    with archiv:
+                        for jmeno_souboru in archiv.namelist():
+                            # Ignorujeme složky a skryté systémové soubory (jako .DS_Store z Macu)
+                            if jmeno_souboru.endswith('/') or '__MACOSX' in jmeno_souboru or jmeno_souboru.startswith('.'):
+                                continue
+                            
+                            try:
+                                # Zkusíme soubor přečíst jako text
+                                obsah = archiv.read(jmeno_souboru).decode('utf-8')
+                                nacteny_kod += f"\n\n==== SOUBOR: {jmeno_souboru} ====\n{obsah}\n"
+                                if len(nacteny_kod) > MAX_RESENI_ZNAKU:
+                                    st.warning("⚠️ Řešení je příliš velké, načtena pouze část souborů.")
+                                    break
+                            except UnicodeDecodeError:
+                                # Pokud je to obrázek (png/jpg) nebo binárka, přeskočíme ho
+                                pass
+                            except RuntimeError:
+                                # Heslem chráněný soubor v ZIP archivu
+                                st.error("❌ ZIP archiv obsahuje soubory chráněné heslem. Nahrajte archiv bez hesla.")
+                                st.stop()
+                    
+                    if not nacteny_kod.strip():
+                        st.error("❌ ZIP soubor je prázdný nebo neobsahuje žádné čitelné textové soubory.")
+                        st.stop()
+                        
+                    st.session_state['obsah_reseni'] = nacteny_kod
+                else:
+                    # Klasický jeden soubor (.py, .js atd.)
+                    try:
+                        obsah_souboru = soubor_reseni.getvalue().decode("utf-8")
+                    except UnicodeDecodeError:
+                        st.error("❌ Soubor s řešením není platný textový soubor (chybné kódování). Použijte soubor v UTF-8.")
+                        st.stop()
+                    
+                    if len(obsah_souboru) > MAX_RESENI_ZNAKU:
+                        st.warning(f"⚠️ Soubor je velmi velký ({len(obsah_souboru):,} znaků). Bude oříznut na {MAX_RESENI_ZNAKU:,} znaků.")
+                        obsah_souboru = obsah_souboru[:MAX_RESENI_ZNAKU]
+                    
+                    st.session_state['obsah_reseni'] = obsah_souboru
             else:
-                # Klasický jeden soubor (.py, .js atd.)
-                try:
-                    obsah_souboru = soubor_reseni.getvalue().decode("utf-8")
-                except UnicodeDecodeError:
-                    st.error("❌ Soubor s řešením není platný textový soubor (chybné kódování). Použijte soubor v UTF-8.")
-                    st.stop()
+                # --- Kód z inline editoru ---
+                obsah_editoru = kod_z_editoru.strip()
                 
-                if len(obsah_souboru) > MAX_RESENI_ZNAKU:
-                    st.warning(f"⚠️ Soubor je velmi velký ({len(obsah_souboru):,} znaků). Bude oříznut na {MAX_RESENI_ZNAKU:,} znaků.")
-                    obsah_souboru = obsah_souboru[:MAX_RESENI_ZNAKU]
+                if len(obsah_editoru) > MAX_RESENI_ZNAKU:
+                    st.warning(f"⚠️ Kód je velmi dlouhý ({len(obsah_editoru):,} znaků). Bude oříznut na {MAX_RESENI_ZNAKU:,} znaků.")
+                    obsah_editoru = obsah_editoru[:MAX_RESENI_ZNAKU]
                 
-                st.session_state['obsah_reseni'] = obsah_souboru
+                st.session_state['obsah_reseni'] = obsah_editoru
             
             # Uložíme si nový otisk do paměti
             st.session_state['posledni_otisk_souboru'] = aktualni_otisk
@@ -311,13 +391,6 @@ with tab_evaluator:
         obsah_zadani = st.session_state.get('obsah_zadani')
         obsah_reseni = st.session_state.get('obsah_reseni')
         
-        # --- ZOBRAZENÍ TEXTU ZADÁNÍ ---
-        if obsah_zadani:
-            with st.expander("📄 Kompletní text maturitního zadání", expanded=False):
-                # Odstraníme skrytá metadata z konce textu pro čistý výpis
-                ciste_zadani = re.sub(r"<!-- EVAL_METADATA: (.*?) -->", "", obsah_zadani, flags=re.DOTALL)
-                st.markdown(ciste_zadani)
-
         # --- KONTROLA METADAT PRO AI (Bez vykreslování tabulky do UI) ---
         if not metadata:
             st.error("❌ V souboru nebyla nalezena skrytá metadata pro Inspektora. Ujistěte se, že používáte soubor vygenerovaný v první záložce.")
