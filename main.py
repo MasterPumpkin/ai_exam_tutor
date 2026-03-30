@@ -2,11 +2,10 @@ import streamlit as st
 import os
 from dotenv import load_dotenv
 import json
-from groq import Groq, RateLimitError, AuthenticationError, APIConnectionError, APITimeoutError
+from groq import Groq, RateLimitError, AuthenticationError, APIConnectionError, APITimeoutError, BadRequestError
 import re
 import zipfile
 from zipfile import BadZipFile
-import io
 import random
 
 # --- 1. DATABÁZE MATURITNÍCH OKRUHŮ ---
@@ -108,7 +107,10 @@ Vrať POUZE platný formát JSON s následující strukturou:
         if not response.choices:
             return False, "AI nevrátila žádnou odpověď."
         
-        raw_content = response.choices[0].message.content.strip()
+        raw_content = response.choices[0].message.content
+        if not raw_content:
+            return False, "AI vrátila prázdnou odpověď. Zkuste vygenerovat zadání znovu."
+        raw_content = raw_content.strip()
         
         if raw_content.startswith("```json"):
             raw_content = raw_content.replace("```json", "", 1)
@@ -170,7 +172,7 @@ with st.sidebar:
     st.header("⚙️ Nastavení")
     if not api_key:
         st.warning("Nebyl nalezen lokální API klíč. Prosím, vložte svůj Groq API klíč.")
-        api_key = st.text_input("API Klíč", type="password", placeholder="gsk_...")
+        api_key = st.text_input("API Klíč", type="password", placeholder="gsk_...").strip()
         if api_key:
             st.success("Klíč vložen! Můžete pokračovat.")
     else:
@@ -249,7 +251,7 @@ with tab_evaluator:
             st.session_state['zadani_name'] = soubor_zadani.name
             
             # 2. Zpracování řešení (Může být textový kód NEBO ZIP archiv)
-            if soubor_reseni.name.endswith('.zip'):
+            if soubor_reseni.name.lower().endswith('.zip'):
                 nacteny_kod = ""
                 try:
                     archiv = zipfile.ZipFile(soubor_reseni)
@@ -273,6 +275,10 @@ with tab_evaluator:
                         except UnicodeDecodeError:
                             # Pokud je to obrázek (png/jpg) nebo binárka, přeskočíme ho
                             pass
+                        except RuntimeError:
+                            # Heslem chráněný soubor v ZIP archivu
+                            st.error("❌ ZIP archiv obsahuje soubory chráněné heslem. Nahrajte archiv bez hesla.")
+                            st.stop()
                 
                 if not nacteny_kod.strip():
                     st.error("❌ ZIP soubor je prázdný nebo neobsahuje žádné čitelné textové soubory.")
@@ -298,10 +304,8 @@ with tab_evaluator:
             st.session_state['zadani_nahrano'] = True
             
             # Tvrdý reset chatu a Inspektora, protože se změnily zdrojové soubory!
-            if 'evaluace_spustena' in st.session_state:
-                del st.session_state['evaluace_spustena']
-            if 'chat_history' in st.session_state:
-                del st.session_state['chat_history']
+            st.session_state.pop('evaluace_spustena', None)
+            st.session_state.pop('chat_history', None)
         
         metadata = st.session_state.get('metadata')
         obsah_zadani = st.session_state.get('obsah_zadani')
@@ -320,6 +324,10 @@ with tab_evaluator:
             st.stop()
 
         # --- TLAČÍTKO START ---
+        if not obsah_reseni:
+            st.warning("⚠️ Nebylo načteno žádné řešení. Nahrajte soubory znovu.")
+            st.stop()
+        
         if not st.session_state.get('evaluace_spustena'):
             if st.button("Zahájit kontrolu a diskuzi", type="primary"):
                 # Sestavení prvotního promptu
@@ -365,6 +373,10 @@ KÓD STUDENTA:
                         st.error("🔑 API klíč je neplatný nebo expiroval. Zkontrolujte ho v levém panelu.")
                         del st.session_state['chat_history']
                         st.stop()
+                    except BadRequestError:
+                        st.error("❌ Požadavek na AI selhal (příliš velká data nebo neplatný formát). Zkuste zkrátit řešení a začít znovu.")
+                        del st.session_state['chat_history']
+                        st.stop()
                     except (APIConnectionError, APITimeoutError):
                         st.error("🌐 Nepodařilo se spojit se serverem AI. Zkontrolujte připojení k internetu.")
                         del st.session_state['chat_history']
@@ -383,8 +395,14 @@ KÓD STUDENTA:
                     st.session_state['celkove_tokeny'] += response.usage.total_tokens
                     token_placeholder.metric("📊 Spotřebované tokeny", f"{st.session_state['celkove_tokeny']:,}")
                 
+                prvni_odpoved = response.choices[0].message.content
+                if not prvni_odpoved:
+                    st.error("❌ AI vrátila prázdnou odpověď. Zkuste to znovu.")
+                    del st.session_state['chat_history']
+                    st.stop()
+                
                 st.session_state['evaluace_spustena'] = True
-                st.session_state['chat_history'].append({"role": "assistant", "content": response.choices[0].message.content})
+                st.session_state['chat_history'].append({"role": "assistant", "content": prvni_odpoved})
                 st.rerun()
 
         # --- VYKRESLENÍ CHATU ---
@@ -396,8 +414,8 @@ KÓD STUDENTA:
             with col_reset:
                 # Tlačítko pro reset vymaže historii a stav spuštění
                 if st.button("🔄 Resetovat diskuzi", use_container_width=True):
-                    del st.session_state['evaluace_spustena']
-                    del st.session_state['chat_history']
+                    st.session_state.pop('evaluace_spustena', None)
+                    st.session_state.pop('chat_history', None)
                     st.rerun()
                     
             with col_download:
@@ -428,6 +446,10 @@ KÓD STUDENTA:
 
             # 2. Vstup od studenta
             if prompt := st.chat_input("Tvá odpověď nebo opravený kód..."):
+                prompt = prompt.strip()
+                if not prompt:
+                    st.rerun()
+                
                 # Uložíme dotaz a rovnou ho i tady pro jistotu vypíšeme
                 st.session_state['chat_history'].append({"role": "user", "content": prompt})
                 with st.chat_message("user"):
@@ -444,24 +466,28 @@ KÓD STUDENTA:
                                 temperature=0.3
                             )
                         except RateLimitError:
-                            st.warning("⏳ Byl překročen limit požadavků. Počkejte chvíli a pošlete zprávu znovu.")
-                            st.session_state['chat_history'].pop()  # Odebereme neodeslaný dotaz
+                            st.toast("⏳ Limit požadavků překročen. Počkejte chvíli a pošlete znovu.", icon="⏳")
+                            st.session_state['chat_history'].pop()
                             st.rerun()
                         except AuthenticationError:
-                            st.error("🔑 API klíč je neplatný nebo expiroval. Zkontrolujte ho v levém panelu.")
+                            st.toast("🔑 API klíč je neplatný. Zkontrolujte nastavení.", icon="🔑")
+                            st.session_state['chat_history'].pop()
+                            st.rerun()
+                        except BadRequestError:
+                            st.toast("💬 Konverzace je příliš dlouhá. Resetujte diskuzi a začněte znovu.", icon="💬")
                             st.session_state['chat_history'].pop()
                             st.rerun()
                         except (APIConnectionError, APITimeoutError):
-                            st.warning("🌐 Nepodařilo se spojit se serverem. Zkuste odeslat zprávu znovu.")
+                            st.toast("🌐 Nelze se spojit se serverem. Zkuste to znovu.", icon="🌐")
                             st.session_state['chat_history'].pop()
                             st.rerun()
                         except Exception as e:
-                            st.error(f"❌ Neočekávaná chyba: {e}")
+                            st.toast(f"❌ Chyba: {e}", icon="❌")
                             st.session_state['chat_history'].pop()
                             st.rerun()
                         
                         if not response.choices:
-                            st.warning("🤔 AI nevrátila odpověď. Zkuste odeslat zprávu znovu.")
+                            st.toast("🤔 AI nevrátila odpověď. Zkuste to znovu.", icon="🤔")
                             st.session_state['chat_history'].pop()
                             st.rerun()
                         
@@ -471,6 +497,11 @@ KÓD STUDENTA:
                             token_placeholder.metric("📊 Spotřebované tokeny", f"{st.session_state['celkove_tokeny']:,}")
                             
                         odpoved = response.choices[0].message.content
+                        if not odpoved:
+                            st.toast("🤔 AI vrátila prázdnou odpověď. Zkuste to znovu.", icon="🤔")
+                            st.session_state['chat_history'].pop()
+                            st.rerun()
+                        
                         st.markdown(odpoved)
                         
                         # Uložení odpovědi do historie
