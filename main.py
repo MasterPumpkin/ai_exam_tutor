@@ -2,7 +2,7 @@ import streamlit as st
 import os
 from dotenv import load_dotenv
 import json
-from groq import Groq
+from groq import Groq, RateLimitError, AuthenticationError, APIConnectionError, APITimeoutError
 import re
 import zipfile
 import io
@@ -54,8 +54,10 @@ MATURITNI_OKRUHY = {
     }
 }
 
+MAX_RESENI_ZNAKU = 50_000  # Maximální délka řešení v znacích vkládaná do promptu
+
 # --- 2. FUNKCE ---
-def vygeneruj_zadani_podle_sablony(klic_okruhu, api_key):
+def vygeneruj_zadani_podle_sablony(klic_okruhu, api_key, token_placeholder=None):
     sablona = MATURITNI_OKRUHY[klic_okruhu]
     client = Groq(api_key=api_key)
     
@@ -96,10 +98,12 @@ Vrať POUZE platný formát JSON s následující strukturou:
             temperature=0.7
         )
 
-        if 'celkove_tokeny' in st.session_state:
-            st.session_state['celkove_tokeny'] += response.usage.total_tokens
-            # OKAMŽITÝ UPDATE UI:
+        st.session_state['celkove_tokeny'] += response.usage.total_tokens
+        if token_placeholder:
             token_placeholder.metric("📊 Spotřebované tokeny", f"{st.session_state['celkove_tokeny']:,}")
+        
+        if not response.choices:
+            return False, "AI nevrátila žádnou odpověď."
         
         raw_content = response.choices[0].message.content.strip()
         
@@ -123,10 +127,16 @@ Vrať POUZE platný formát JSON s následující strukturou:
         end_tag = " --" + ">"
         finalni_md += f"{start_tag}{metadata_string}{end_tag}"
         
-        return finalni_md
+        return True, finalni_md
         
+    except RateLimitError:
+        return False, "Byl překročen limit požadavků na AI. Počkejte prosím minutu a zkuste to znovu."
+    except AuthenticationError:
+        return False, "API klíč je neplatný nebo expiroval. Zkontrolujte ho v levém panelu."
+    except (APIConnectionError, APITimeoutError):
+        return False, "Nepodařilo se spojit se serverem AI. Zkontrolujte připojení k internetu a zkuste to znovu."
     except Exception as e:
-        return f"❌ Došlo k chybě: {e}"
+        return False, f"Neočekávaná chyba: {e}"
 
 def ziskej_metadata_ze_zadani(text):
     """Bezpečně vytáhne skrytá metadata ze zadání. Používá re.DOTALL a toleruje mezery."""    
@@ -188,10 +198,10 @@ with tab_generator:
     
     if st.button("Vygenerovat unikátní zadání", type="primary"):
         with st.spinner(f"AI na Groqu právě vymýšlí úlohu pro okruh: {vybrany_nazev}..."):
-            vysledek = vygeneruj_zadani_podle_sablony(vybrany_klic, api_key)
+            uspech, vysledek = vygeneruj_zadani_podle_sablony(vybrany_klic, api_key, token_placeholder)
             
-            if vysledek.startswith("❌"):
-                st.error(vysledek)
+            if not uspech:
+                st.error(f"❌ {vysledek}")
             else:
                 st.session_state['vygenerovane_zadani'] = vysledek
                 st.success("Zadání bylo úspěšně vygenerováno! Nyní si ho stáhni.")
@@ -243,6 +253,9 @@ with tab_evaluator:
                             # Zkusíme soubor přečíst jako text
                             obsah = z.read(jmeno_souboru).decode('utf-8')
                             nacteny_kod += f"\n\n==== SOUBOR: {jmeno_souboru} ====\n{obsah}\n"
+                            if len(nacteny_kod) > MAX_RESENI_ZNAKU:
+                                st.warning("⚠️ Řešení je příliš velké, načtena pouze část souborů.")
+                                break
                         except UnicodeDecodeError:
                             # Pokud je to obrázek (png/jpg) nebo binárka, přeskočíme ho
                             pass
@@ -314,15 +327,32 @@ KÓD STUDENTA:
                 
                 # Volání AI pro první zprávu
                 with st.spinner("Inspektor připravuje hodnocení..."):
-                    client = Groq(api_key=api_key)
-                    response = client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
-                    messages=st.session_state['chat_history'],
-                    temperature=0.3
-                )
-                if 'celkove_tokeny' in st.session_state:
-                    st.session_state['celkove_tokeny'] += response.usage.total_tokens
-                    token_placeholder.metric("📊 Spotřebované tokeny", f"{st.session_state['celkove_tokeny']:,}")
+                    try:
+                        client = Groq(api_key=api_key)
+                        response = client.chat.completions.create(
+                            model="llama-3.3-70b-versatile",
+                            messages=st.session_state['chat_history'],
+                            temperature=0.3
+                        )
+                    except RateLimitError:
+                        st.error("⏳ Byl překročen limit požadavků na AI. Počkejte prosím minutu a zkuste to znovu.")
+                        st.stop()
+                    except AuthenticationError:
+                        st.error("🔑 API klíč je neplatný nebo expiroval. Zkontrolujte ho v levém panelu.")
+                        st.stop()
+                    except (APIConnectionError, APITimeoutError):
+                        st.error("🌐 Nepodařilo se spojit se serverem AI. Zkontrolujte připojení k internetu.")
+                        st.stop()
+                    except Exception as e:
+                        st.error(f"❌ Neočekávaná chyba: {e}")
+                        st.stop()
+                
+                if not response.choices:
+                    st.error("❌ AI nevrátila žádnou odpověď.")
+                    st.stop()
+                
+                st.session_state['celkove_tokeny'] += response.usage.total_tokens
+                token_placeholder.metric("📊 Spotřebované tokeny", f"{st.session_state['celkove_tokeny']:,}")
                 
                 st.session_state['chat_history'].append({"role": "assistant", "content": response.choices[0].message.content})
                 st.rerun()
@@ -376,17 +406,38 @@ KÓD STUDENTA:
                 # Volání API a zobrazení odpovědi Inspektora
                 with st.chat_message("assistant"):
                     with st.spinner("Inspektor přemýšlí..."):
-                        client = Groq(api_key=api_key)
-                        response = client.chat.completions.create(
-                            model="llama-3.3-70b-versatile",
-                            messages=st.session_state['chat_history'],
-                            temperature=0.3
-                        )
+                        try:
+                            client = Groq(api_key=api_key)
+                            response = client.chat.completions.create(
+                                model="llama-3.3-70b-versatile",
+                                messages=st.session_state['chat_history'],
+                                temperature=0.3
+                            )
+                        except RateLimitError:
+                            st.warning("⏳ Byl překročen limit požadavků. Počkejte chvíli a pošlete zprávu znovu.")
+                            st.session_state['chat_history'].pop()  # Odebereme neodeslaný dotaz
+                            st.rerun()
+                        except AuthenticationError:
+                            st.error("🔑 API klíč je neplatný nebo expiroval. Zkontrolujte ho v levém panelu.")
+                            st.session_state['chat_history'].pop()
+                            st.rerun()
+                        except (APIConnectionError, APITimeoutError):
+                            st.warning("🌐 Nepodařilo se spojit se serverem. Zkuste odeslat zprávu znovu.")
+                            st.session_state['chat_history'].pop()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Neočekávaná chyba: {e}")
+                            st.session_state['chat_history'].pop()
+                            st.rerun()
+                        
+                        if not response.choices:
+                            st.warning("🤔 AI nevrátila odpověď. Zkuste odeslat zprávu znovu.")
+                            st.session_state['chat_history'].pop()
+                            st.rerun()
                         
                         # Přičtení tokenů za tuto zprávu
-                        if 'celkove_tokeny' in st.session_state:
-                            st.session_state['celkove_tokeny'] += response.usage.total_tokens
-                            token_placeholder.metric("📊 Spotřebované tokeny", f"{st.session_state['celkove_tokeny']:,}")
+                        st.session_state['celkove_tokeny'] += response.usage.total_tokens
+                        token_placeholder.metric("📊 Spotřebované tokeny", f"{st.session_state['celkove_tokeny']:,}")
                             
                         odpoved = response.choices[0].message.content
                         st.markdown(odpoved)
