@@ -86,6 +86,11 @@ Vrať POUZE platný formát JSON s následující strukturou:
             response_format={"type": "json_object"},
             temperature=0.7
         )
+
+        if 'celkove_tokeny' in st.session_state:
+            st.session_state['celkove_tokeny'] += response.usage.total_tokens
+            # OKAMŽITÝ UPDATE UI:
+            token_placeholder.metric("📊 Spotřebované tokeny", f"{st.session_state['celkove_tokeny']:,}")
         
         raw_content = response.choices[0].message.content.strip()
         
@@ -133,6 +138,10 @@ st.set_page_config(page_title="Maturitní AI Trenér", page_icon="🎓", layout=
 # Kvůli kompatibilitě se podíváme na GROQ_API_KEY i OPENAI_API_KEY z .env
 api_key = os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY") 
 
+# (Na úplný začátek souboru, někam pod st.set_page_config, přidej:)
+if 'celkove_tokeny' not in st.session_state:
+    st.session_state['celkove_tokeny'] = 0
+
 with st.sidebar:
     st.header("⚙️ Nastavení")
     if not api_key:
@@ -145,6 +154,10 @@ with st.sidebar:
     
     st.markdown("---")
     st.markdown("Aplikace pro přípravu na maturitu z programování.")
+    
+    st.markdown("---")
+    token_placeholder = st.empty() 
+    token_placeholder.metric("📊 Spotřebované tokeny", f"{st.session_state.get('celkove_tokeny', 0):,}")
 
 if not api_key:
     st.info("👈 Pro spuštění aplikace vložte API klíč v levém panelu.")
@@ -256,15 +269,48 @@ KÓD STUDENTA:
                 with st.spinner("Inspektor připravuje hodnocení..."):
                     client = Groq(api_key=api_key)
                     response = client.chat.completions.create(
-                        model="llama-3.3-70b-versatile",
-                        messages=st.session_state['chat_history'],
-                        temperature=0.3
-                    )
-                    st.session_state['chat_history'].append({"role": "assistant", "content": response.choices[0].message.content})
-                    st.rerun()
+                    model="llama-3.3-70b-versatile",
+                    messages=st.session_state['chat_history'],
+                    temperature=0.3
+                )
+                if 'celkove_tokeny' in st.session_state:
+                    st.session_state['celkove_tokeny'] += response.usage.total_tokens
+                    token_placeholder.metric("📊 Spotřebované tokeny", f"{st.session_state['celkove_tokeny']:,}")
+                
+                st.session_state['chat_history'].append({"role": "assistant", "content": response.choices[0].message.content})
+                st.rerun()
 
         # --- VYKRESLENÍ CHATU ---
         if st.session_state.get('evaluace_spustena'):
+            st.divider()
+            
+            col_reset, col_download = st.columns(2)
+            
+            with col_reset:
+                # Tlačítko pro reset vymaže historii a stav spuštění
+                if st.button("🔄 Resetovat diskuzi", use_container_width=True):
+                    del st.session_state['evaluace_spustena']
+                    del st.session_state['chat_history']
+                    st.rerun()
+                    
+            with col_download:
+                # Dynamické sestavení protokolu z historie
+                protokol_text = "# Záznam o maturitní zkoušce\n\n"
+                for msg in st.session_state['chat_history']:
+                    if msg["role"] == "system": 
+                        continue
+                    autor = "🧑‍🎓 Student" if msg["role"] == "user" else "🤖 Inspektor"
+                    protokol_text += f"### {autor}\n{msg['content']}\n\n---\n"
+                
+                # Tlačítko pro stažení
+                st.download_button(
+                    label="💾 Stáhnout protokol (.md)",
+                    data=protokol_text,
+                    file_name="maturitni_protokol.md",
+                    mime="text/markdown",
+                    use_container_width=True
+                )
+            
             st.divider()
             
             # 1. Zobrazení historie (vyjma systémového promptu)
@@ -275,7 +321,6 @@ KÓD STUDENTA:
 
             # 2. Vstup od studenta
             if prompt := st.chat_input("Tvá odpověď nebo opravený kód..."):
-                # Zobrazení zprávy studenta
                 st.session_state['chat_history'].append({"role": "user", "content": prompt})
                 with st.chat_message("user"):
                     st.markdown(prompt)
@@ -289,6 +334,12 @@ KÓD STUDENTA:
                             messages=st.session_state['chat_history'],
                             temperature=0.3
                         )
+                        
+                        # NOVÉ PRO KROK 3: Přičtení tokenů za tuto zprávu
+                        if 'celkove_tokeny' in st.session_state:
+                            st.session_state['celkove_tokeny'] += response.usage.total_tokens
+                            token_placeholder.metric("📊 Spotřebované tokeny", f"{st.session_state['celkove_tokeny']:,}")
+                            
                         odpoved = response.choices[0].message.content
                         st.markdown(odpoved)
                         st.session_state['chat_history'].append({"role": "assistant", "content": odpoved})
