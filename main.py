@@ -212,34 +212,77 @@ with tab_generator:
                 st.error(f"❌ {vysledek}")
             else:
                 st.session_state['vygenerovane_zadani'] = vysledek
-                st.success("Zadání bylo úspěšně vygenerováno! Nyní si ho stáhni.")
+                st.success("Zadání bylo úspěšně vygenerováno!")
     
     if 'vygenerovane_zadani' in st.session_state:
-        st.download_button(
-            label="📄 Stáhnout zadání (.md)",
-            data=st.session_state['vygenerovane_zadani'],
-            file_name="maturitni_zadani.md",
-            mime="text/markdown"
-        )
+        # Náhled vygenerovaného zadání (bez skrytých metadat)
+        with st.expander("📄 Náhled vygenerovaného zadání", expanded=True):
+            nahled_gen = re.sub(r"<!-- EVAL_METADATA: (.*?) -->", "",
+                                st.session_state['vygenerovane_zadani'], flags=re.DOTALL)
+            st.markdown(nahled_gen)
+        
+        # Tlačítka vedle sebe: stáhnout + přenést
+        col_stahnout, col_prenest = st.columns(2)
+        with col_stahnout:
+            st.download_button(
+                label="📥 Stáhnout zadání (.md)",
+                data=st.session_state['vygenerovane_zadani'],
+                file_name="maturitni_zadani.md",
+                mime="text/markdown",
+                use_container_width=True
+            )
+        with col_prenest:
+            if st.button("➡️ Přenést na evaluátor", use_container_width=True, type="primary"):
+                st.session_state['prenesene_zadani'] = st.session_state['vygenerovane_zadani']
+                # Reset evaluátoru, pokud běžel s jiným zadáním
+                for klic in ['obsah_zadani', 'metadata', 'posledni_otisk_souboru',
+                             'evaluace_spustena', 'chat_history']:
+                    st.session_state.pop(klic, None)
+                st.toast("✅ Zadání přeneseno! Přejděte na záložku Evaluátor řešení.", icon="✅")
+                st.rerun()
+        
+        # Indikátor, že zadání už bylo přeneseno
+        if 'prenesene_zadani' in st.session_state:
+            st.info("ℹ️ Zadání je přeneseno na evaluátor. Přejděte na záložku **2️⃣ Evaluátor řešení**.")
 
 # --- ZÁLOŽKA 2: EVALUÁTOR ---
 with tab_evaluator:
     st.header("Inspektor – Sokratovské hodnocení")
     
-    # 1. Nahrání zadání
-    soubor_zadani = st.file_uploader("📄 Nahraj zadání (.md)", type=['md'], key="eval_md")
+    # 1. Nahrání zadání – buď přenesené z generátoru, nebo ruční upload
+    pouzit_prenesene = False
+    soubor_zadani = None
     
-    # Náhled zadání – zobrazíme hned po nahrání, bez čekání na řešení
-    if soubor_zadani:
-        try:
-            nahled_zadani = soubor_zadani.getvalue().decode("utf-8")
-        except UnicodeDecodeError:
-            nahled_zadani = None
+    if 'prenesene_zadani' in st.session_state:
+        # Zadání bylo přeneseno z generátoru
+        pouzit_prenesene = True
+        st.success("📄 Zadání bylo automaticky přeneseno z generátoru.")
+        with st.expander("📄 Kompletní text maturitního zadání", expanded=False):
+            ciste_prenesene = re.sub(r"<!-- EVAL_METADATA: (.*?) -->", "",
+                                     st.session_state['prenesene_zadani'], flags=re.DOTALL)
+            st.markdown(ciste_prenesene)
+        if st.button("❌ Zrušit přenesené zadání (nahrát jiný soubor)"):
+            st.session_state.pop('prenesene_zadani', None)
+            # Reset evaluátoru při změně zadání
+            for klic in ['obsah_zadani', 'metadata', 'posledni_otisk_souboru',
+                         'evaluace_spustena', 'chat_history']:
+                st.session_state.pop(klic, None)
+            st.rerun()
+    else:
+        # Ruční upload zadání
+        soubor_zadani = st.file_uploader("📄 Nahraj zadání (.md)", type=['md'], key="eval_md")
         
-        if nahled_zadani:
-            with st.expander("📄 Kompletní text maturitního zadání", expanded=False):
-                ciste_zadani = re.sub(r"<!-- EVAL_METADATA: (.*?) -->", "", nahled_zadani, flags=re.DOTALL)
-                st.markdown(ciste_zadani)
+        # Náhled zadání – zobrazíme hned po nahrání, bez čekání na řešení
+        if soubor_zadani:
+            try:
+                nahled_zadani = soubor_zadani.getvalue().decode("utf-8")
+            except UnicodeDecodeError:
+                nahled_zadani = None
+            
+            if nahled_zadani:
+                with st.expander("📄 Kompletní text maturitního zadání", expanded=False):
+                    ciste_zadani = re.sub(r"<!-- EVAL_METADATA: (.*?) -->", "", nahled_zadani, flags=re.DOTALL)
+                    st.markdown(ciste_zadani)
     
     st.divider()
     
@@ -294,10 +337,16 @@ with tab_evaluator:
     # 2. Zpracování souborů / editoru do Cache
     ma_reseni = soubor_reseni or (kod_z_editoru and kod_z_editoru.strip())
     
-    if soubor_zadani and ma_reseni:
+    # Detekce, zda máme zadání (z uploadu NEBO přenosu)
+    ma_zadani = soubor_zadani or pouzit_prenesene
+    
+    if ma_zadani and ma_reseni:
         
         # Vytvoříme unikátní identifikátor – zvlášť pro zadání a řešení
-        zadani_otisk = f"{soubor_zadani.name}_{soubor_zadani.size}"
+        if pouzit_prenesene:
+            zadani_otisk = f"prenesene_{hash(st.session_state['prenesene_zadani'])}"
+        else:
+            zadani_otisk = f"{soubor_zadani.name}_{soubor_zadani.size}"
         
         if zpusob_vlozeni == "📁 Nahrát soubor / ZIP" and soubor_reseni:
             reseni_otisk = f"file_{soubor_reseni.name}_{soubor_reseni.size}"
@@ -310,14 +359,18 @@ with tab_evaluator:
         # Ošetření: Načteme soubory poprvé, nebo když se změní "otisk"
         if 'posledni_otisk_souboru' not in st.session_state or st.session_state['posledni_otisk_souboru'] != aktualni_otisk:
             
-            # 1. Zpracování zadání (to je vždy .md)
-            try:
-                st.session_state['obsah_zadani'] = soubor_zadani.getvalue().decode("utf-8")
-            except UnicodeDecodeError:
-                st.error("❌ Soubor se zadáním není platný textový soubor (chybné kódování). Použijte soubor v UTF-8.")
-                st.stop()
+            # 1. Zpracování zadání
+            if pouzit_prenesene:
+                st.session_state['obsah_zadani'] = st.session_state['prenesene_zadani']
+                st.session_state['zadani_name'] = "prenesene_zadani.md"
+            else:
+                try:
+                    st.session_state['obsah_zadani'] = soubor_zadani.getvalue().decode("utf-8")
+                except UnicodeDecodeError:
+                    st.error("❌ Soubor se zadáním není platný textový soubor (chybné kódování). Použijte soubor v UTF-8.")
+                    st.stop()
+                st.session_state['zadani_name'] = soubor_zadani.name
             st.session_state['metadata'] = ziskej_metadata_ze_zadani(st.session_state['obsah_zadani'])
-            st.session_state['zadani_name'] = soubor_zadani.name
             
             # 2. Zpracování řešení
             if zpusob_vlozeni == "📁 Nahrát soubor / ZIP" and soubor_reseni:

@@ -7,6 +7,8 @@ Interaktivní webová aplikace pro přípravu na maturitní zkoušku z programov
 ### 1️⃣ Generátor zadání
 - Vygeneruje unikátní maturitní úlohu pro zvolený okruh
 - Každé zadání má **jasná hodnotící kritéria** s bodovým rozpisem
+- **Náhled zadání** přímo v aplikaci ihned po vygenerování
+- **Přenos na evaluátor** jedním kliknutím – bez nutnosti stahovat a znovu nahrávat soubor
 - Zadání obsahuje skrytá metadata pro automatický evaluátor
 - Podporované okruhy:
   - **Imperativní programování** – cykly, funkce, základní algoritmy
@@ -16,6 +18,7 @@ Interaktivní webová aplikace pro přípravu na maturitní zkoušku z programov
 ### 2️⃣ Evaluátor řešení (Inspektor)
 - Sokratovské hodnocení – **nenapíše kód za studenta**, ale klade návodné otázky
 - Bodové ohodnocení podle kritérií z vygenerovaného zadání
+- Automatické načtení zadání přeneseného z generátoru (nebo ruční upload `.md`)
 - Interaktivní chat pro diskuzi nad kódem
 - Podpora jednotlivých souborů (`.py`, `.js`, `.php`, `.html`, `.css`, `.cpp`) i **ZIP archivů**
 - Export celého protokolu zkoušky do `.md` souboru
@@ -68,14 +71,16 @@ Aplikace se otevře na `http://localhost:8501`.
 1. Přejděte na záložku **Generátor zadání**
 2. Vyberte maturitní okruh
 3. Klikněte na **Vygenerovat unikátní zadání**
-4. Stáhněte vygenerovaný `.md` soubor
+4. Prohlédněte si náhled zadání přímo v aplikaci
+5. Stáhněte `.md` soubor a/nebo klikněte na **➡️ Přenést na evaluátor**
 
 ### Hodnocení řešení
 1. Přejděte na záložku **Evaluátor řešení**
-2. Nahrajte vygenerované zadání (`.md`)
-3. Nahrajte své řešení (kód nebo ZIP)
-4. Klikněte na **Zahájit kontrolu a diskuzi**
-5. Diskutujte s AI Inspektorem o svém kódu
+   - Pokud jste použili přenos z generátoru, zadání je již načteno
+   - Jinak nahrajte vygenerované zadání (`.md`) ručně
+2. Nahrajte své řešení (kód nebo ZIP) nebo použijte vestavěný editor
+3. Klikněte na **Zahájit kontrolu a diskuzi**
+4. Diskutujte s AI Inspektorem o svém kódu
 
 ## 🛠️ Technologie
 
